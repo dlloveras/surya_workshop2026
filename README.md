@@ -1,6 +1,6 @@
 # Surya Workshop
 
-A template repository for fine-tuning [Surya](https://github.com/NASA-IMPACT/Surya), the first foundation model for heliophysics, on your own downstream solar science tasks.
+A template repository for fine-tuning [Surya](https://github.com/NASA-IMPACT/Surya), the first foundation model for heliophysics, on your own downstream solar science tasks. 
 
 ---
 
