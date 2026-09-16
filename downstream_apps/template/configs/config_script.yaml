@@ -132,12 +132,15 @@ model:
     time_dim: 1         # Number of input timesteps (must match time_delta_input_minutes length)
 
   # -- Fine-tuning head --
+  # Head layers live on the model as head_* attributes; see ADAPTING.md before adding one.
   pooling: class_token  # Options: class_token | global_average | global_max | attention | transformer
   penultimate_linear_layer: true
   dropout: 0.2
   freeze_backbone: false
 
   # -- LoRA adapters --
+  # Trainable under use_lora: true = these adapters + every head_* module.
+  # The head is discovered automatically from the head_ naming convention.
   use_lora: true
   lora_config:
     r: 8
