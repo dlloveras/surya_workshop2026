@@ -67,11 +67,23 @@ class LoraAdapterConfig:
 
     Passed to apply_peft_lora(); mirrors the fields of peft.LoraConfig.
     Named LoraAdapterConfig to avoid confusion with peft.LoraConfig.
+
+    The default target_modules match the Surya backbone's actual layer names:
+    the feed-forward layers (fc1/fc2) in all blocks, plus the fused attention
+    projection (attn.qkv) and output projection (attn.proj) in the attention
+    blocks.  The dotted forms are deliberate -- a bare "proj" would also match
+    the Conv2d patch-embedding tokeniser at embedding.patch_embed.proj.
+
+    PEFT only errors when *no* entry matches anything, so a misspelt name is
+    silently ignored; keep this list in sync with the backbone.
+
+    There is no modules_to_save field: apply_peft_lora() discovers the
+    fine-tuning head automatically from the ``head_`` naming convention.
     """
     r: int = 8
     lora_alpha: int = 8
     target_modules: List[str] = field(
-        default_factory=lambda: ["q_proj", "v_proj", "k_proj", "out_proj", "fc1", "fc2"]
+        default_factory=lambda: ["fc1", "fc2", "attn.qkv", "attn.proj"]
     )
     lora_dropout: float = 0.1
     bias: str = "none"

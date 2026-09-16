@@ -144,7 +144,11 @@ model:
     lora_alpha: 8
     lora_dropout: 0.1
     bias: none
-    target_modules: [q_proj, v_proj, k_proj, out_proj, fc1, fc2]
+    # fc1/fc2 in all 10 blocks; attn.qkv/attn.proj in the 8 attention blocks.
+    # Dotted names are required: a bare "proj" would also match the Conv2d
+    # patch-embedding tokeniser. Never adapted: the spectral complex_weight,
+    # attn.to_dynamic_projection, and the patch embedding.
+    target_modules: [fc1, fc2, attn.qkv, attn.proj]
 
 
 # -----------------------------------------------------------------------------
