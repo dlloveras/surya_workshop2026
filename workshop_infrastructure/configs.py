@@ -132,6 +132,34 @@ class ModelConfig:
     # Kept on ModelConfig (not TrainingConfig) because it describes the model, not the run.
     pretrained_path: Optional[str] = None
 
+    def __post_init__(self) -> None:
+        if self.img_size % self.patch_size != 0:
+            raise ValueError(
+                f"model.img_size ({self.img_size}) must be divisible by model.patch_size "
+                f"({self.patch_size}); patch embedding silently crops the remainder otherwise."
+            )
+        if not 0 <= self.spectral_blocks <= self.depth:
+            raise ValueError(
+                f"model.spectral_blocks ({self.spectral_blocks}) must be between 0 and "
+                f"model.depth ({self.depth}) inclusive: spectral_blocks is the cutoff within "
+                f"the depth blocks, not an additional count."
+            )
+        bad_layers = [i for i in self.checkpoint_layers if not 0 <= i < self.depth]
+        if bad_layers:
+            raise ValueError(
+                f"model.checkpoint_layers contains out-of-range index(es) {bad_layers}; "
+                f"each entry must satisfy 0 <= i < model.depth ({self.depth}). Out-of-range "
+                "entries are silently ignored at runtime rather than erroring, so they are "
+                "rejected here instead."
+            )
+        if self.learned_flow and self.time_embedding.type != "linear":
+            raise ValueError(
+                f"model.learned_flow is only supported with model.time_embedding.type "
+                f'"linear"; got type={self.time_embedding.type!r}. The vendored backbone\'s '
+                "\"linear\" embedding adjusts its channel count for the extra learned-flow "
+                "frame, but the other embedding types do not."
+            )
+
 
 # ---------------------------------------------------------------------------
 # Run configuration

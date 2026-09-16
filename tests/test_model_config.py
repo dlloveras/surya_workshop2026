@@ -1,9 +1,10 @@
-"""Tests for the nglo/pooling derivation.
+"""Tests for the nglo/pooling derivation and ModelConfig's self-contained invariants.
 
 Guards the bug where ``model.nglo`` had to be hand-kept in sync with ``model.pooling`` or
 the long-short attention reshape failed deep in vendored code, on the first forward pass
 (not at construction). ``nglo`` is now derived from ``pooling`` inside
-``HelioSpectformer1D`` rather than being a config field.
+``HelioSpectformer1D`` rather than being a config field, so this also guards the other
+invariants ``ModelConfig.__post_init__`` validates on its own fields.
 
 Everything runs on CPU with a tiny backbone, so the suite is fast.
 """
@@ -14,7 +15,7 @@ import pytest
 
 from conftest import make_batch, make_model
 from downstream_apps.template.configs import load_flare_config
-from workshop_infrastructure.configs import ModelConfig
+from workshop_infrastructure.configs import ModelConfig, TimeEmbeddingConfig
 
 
 def test_model_config_has_no_nglo_field():
@@ -32,3 +33,54 @@ def test_every_pooling_runs_a_forward_pass_with_the_derived_nglo(pooling):
     model = make_model(pooling=pooling)
     output = model(make_batch())
     assert output.shape == (2,)
+
+
+# ---------------------------------------------------------------------------
+# ModelConfig.__post_init__
+# ---------------------------------------------------------------------------
+
+
+def test_default_model_config_is_valid():
+    ModelConfig()  # must not raise
+
+
+def test_img_size_not_divisible_by_patch_size_raises():
+    with pytest.raises(ValueError, match="img_size"):
+        ModelConfig(img_size=100, patch_size=16)
+
+
+def test_img_size_divisible_by_patch_size_is_accepted():
+    ModelConfig(img_size=64, patch_size=16)
+
+
+def test_spectral_blocks_greater_than_depth_raises():
+    with pytest.raises(ValueError, match="spectral_blocks"):
+        ModelConfig(depth=3, spectral_blocks=4)
+
+
+@pytest.mark.parametrize("spectral_blocks", [0, 3])
+def test_spectral_blocks_at_the_boundary_is_accepted(spectral_blocks):
+    ModelConfig(depth=3, spectral_blocks=spectral_blocks, checkpoint_layers=[])
+
+
+def test_checkpoint_layers_out_of_range_raises():
+    with pytest.raises(ValueError, match="checkpoint_layers"):
+        ModelConfig(depth=3, checkpoint_layers=[0, 3])
+
+
+def test_checkpoint_layers_negative_raises():
+    with pytest.raises(ValueError, match="checkpoint_layers"):
+        ModelConfig(depth=3, checkpoint_layers=[-1])
+
+
+def test_checkpoint_layers_in_range_is_accepted():
+    ModelConfig(depth=3, checkpoint_layers=[0, 1, 2])
+
+
+def test_learned_flow_with_non_linear_time_embedding_raises():
+    with pytest.raises(ValueError, match="learned_flow"):
+        ModelConfig(learned_flow=True, time_embedding=TimeEmbeddingConfig(type="perceiver"))
+
+
+def test_learned_flow_with_linear_time_embedding_is_accepted():
+    ModelConfig(learned_flow=True, time_embedding=TimeEmbeddingConfig(type="linear"))
