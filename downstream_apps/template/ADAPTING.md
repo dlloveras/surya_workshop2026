@@ -215,9 +215,6 @@ model:
     ...
 ```
 
-Note `nglo` must be `1` when `pooling: class_token` and `0` for every other pooling —
-that pooling injects a global token, and the attention windowing has to know about it.
-
 `use_lora` and `freeze_backbone` together select the fine-tuning regime:
 
 | `use_lora` | `freeze_backbone` | Regime | Trainable |

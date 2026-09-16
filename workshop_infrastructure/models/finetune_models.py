@@ -85,7 +85,6 @@ class HelioSpectformer1D(nn.Module):
         checkpoint_layers: list[int] | None = None,
         rpe: bool = False,
         ensemble: int | None = None,
-        nglo: int = 0,
         dtype: torch.dtype = torch.bfloat16,
         # --- Fine-tuning head ---
         dropout: float = 0.1,
@@ -99,6 +98,12 @@ class HelioSpectformer1D(nn.Module):
 
         if pooling not in _VALID_POOLINGS:
             raise ValueError(f"pooling must be one of {_VALID_POOLINGS}, got {pooling!r}")
+
+        # Only "class_token" pooling prepends a global token to the backbone input (via
+        # forward_with_cls_token, below); every other pooling must run with nglo=0 or the
+        # long-short attention reshape fails. "transformer" pooling also uses a class token,
+        # but concatenates it after the backbone, so it is not "class_token" here.
+        nglo = 1 if pooling == "class_token" else 0
 
         self.backbone = HelioSpectFormer(
             img_size=img_size,
@@ -212,7 +217,6 @@ class HelioSpectformer1D(nn.Module):
             checkpoint_layers=cfg.checkpoint_layers,
             rpe=cfg.rpe,
             ensemble=cfg.ensemble,
-            nglo=cfg.nglo,
             dropout=cfg.dropout,
             pooling=cfg.pooling,
             penultimate_linear_layer=cfg.penultimate_linear_layer,
