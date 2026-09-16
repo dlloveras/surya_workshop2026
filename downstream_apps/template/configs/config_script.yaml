@@ -128,7 +128,7 @@ model:
   time_embedding:
     type: linear        # Options: linear | fourier | perceiver
     n_queries: null     # Required for perceiver; unused otherwise
-    time_dim: 1         # Number of input timesteps (must match time_delta_input_minutes length)
+    time_dim: 1         # Number of input timesteps (must be <= time_delta_input_minutes length)
 
   # -- Fine-tuning head --
   # Head layers live on the model as head_* attributes; see ADAPTING.md before adding one.

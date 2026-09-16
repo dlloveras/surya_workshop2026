@@ -272,6 +272,20 @@ class TrainingConfig:
                 f"training.seed must be an integer, got {self.seed!r} "
                 f"({type(self.seed).__name__}). Write it unquoted in the YAML, e.g. seed: 42."
             )
+        if self.deterministic is True and self.model.learned_flow:
+            raise ValueError(
+                "training.deterministic: true is incompatible with model.learned_flow: true "
+                "(F.grid_sample has no deterministic CUDA backward). Use "
+                'training.deterministic: "warn" instead, or set model.learned_flow: false.'
+            )
+        time_dim = self.model.time_embedding.time_dim
+        n_available = len(self.data.time_delta_input_minutes)
+        if time_dim > n_available:
+            raise ValueError(
+                f"model.time_embedding.time_dim ({time_dim}) must be <= "
+                f"len(data.time_delta_input_minutes) ({n_available}): the dataset samples "
+                "time_dim frames from that list and cannot sample more than it contains."
+            )
 
 
 # ---------------------------------------------------------------------------
