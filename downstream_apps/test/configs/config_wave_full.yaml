@@ -1,0 +1,197 @@
+# =============================================================================
+# Surya workshop — wave classification, RUN-SCALE config
+#
+# Sibling of configs/config_script.yaml. Same five sections, same rules (paths are
+# relative to THIS file's directory; unrecognized keys are an error). The difference
+# is what it is for:
+#
+#   config_script.yaml    — the notebook / smoke-test config. max_samples: 10, and a
+#                           learning rate tuned for the 16 K-param logistic baseline.
+#   config_wave_full.yaml — the config the unattended scaling study runs from. Whole
+#                           matched dataset, Surya-scale learning rate.
+#
+# Both carry the same four fixes (see config_script.yaml for the full write-ups):
+#   time_delta_input_minutes/time_dim  — 2 frames, so the checkpoint's 26-channel
+#                                        tokenizer actually loads (157/159 tensors)
+#   lora_config.target_modules         — names that exist in Surya, so attention adapts
+#   penultimate_linear_layer: false    — drop the capacity-free 1.6 M-param head layer
+#   ds_time_tolerance: 15min           — drop the day-scale matches that skew the balance
+#
+# Settings that vary per RUN rather than per config live on the CLI of
+# 4_finetune_wave_1D.py, because they have no field on TrainingConfig:
+#   --lr --accum --num-workers --prefetch-factor --max-time --train-n --subset-seed
+#   --lora-r --no-penultimate --run-name
+#
+# Usage:
+#   python -m downstream_apps.test.4_finetune_wave_1D \
+#       --config downstream_apps/test/configs/config_wave_full.yaml \
+#       --train-n 384 --max-epochs 14 --max-time 05:30:00 --run-name surya_D_n384
+# =============================================================================
+
+job_id: wave_surya
+
+
+# -----------------------------------------------------------------------------
+# Data
+# -----------------------------------------------------------------------------
+data:
+  # -- Paths (relative to this file's directory) --
+  train_data_path: ../../../data/indices/surya_aws_s3_train.csv
+  valid_data_path: ../../../data/indices/surya_aws_s3_val.csv
+  scalers_path: ../assets/scalers.yaml
+
+  # -- Input channels and temporal sampling --
+  channels: [aia94, aia131, aia171, aia193, aia211, aia304, aia335, aia1600,
+             hmi_m, hmi_bx, hmi_by, hmi_bz, hmi_v]
+  # [-12, 0] is one consecutive frame step (the bucket's modal spacing is 12 min) and
+  # matches the checkpoint's 2-timestep tokenizer. Do not change one without the other:
+  # time_dim below must equal len(this list), and the tokenizer's channel count is
+  # in_channels * time_dim.
+  time_delta_input_minutes: [-12, 0]
+  time_delta_target_minutes: 10   # Unused here: load_forecast_frames=False for this task
+
+  # -- Downstream label alignment (wave catalog → Surya index) --
+  wave_index_path: ../data/lcpf_aia_waves.csv
+  ds_time_column: mid_time      # "wave" rows sit at start_time+30min, "no wave" at -30min
+  ds_time_tolerance: 15min      # Measured: 98.3% of train matches are already within 15 min
+  ds_match_direction: forward   # "forward": use solar state *before* the event (causal)
+  ds_class_column: class        # Values "wave" / "no wave"
+
+  # -- S3 --
+  s3_anon: true
+  s3_mode: download
+  # Measured on this machine, one 13-channel 0.59 GB frame:
+  #     S3 -> memory (BytesIO), 16-way          292 MB/s   (~400 MB/s aggregate, 4-8 in flight)
+  #     S3 -> local NVMe (/home/jovyan), 16-way 352 MB/s
+  #     S3 -> EFS (/home/jovyan/scratch_space)  8.9 MB/s at 8-way, 5.9 at 16-way
+  # The EFS mount is ~40x slower and gets WORSE with concurrency: its throughput is a
+  # property of the filesystem (bursting mode allots ~50 KB/s per GB stored, so ~210 MB/s
+  # for the whole 4.2 TB volume) shared with every other client mounting it. So the cache
+  # lives on the local NVMe here. It only has 77 GB free against a ~500 GB working set,
+  # which is why 4_finetune_wave_1D.py reads through RAM by default
+  # (datasets/wave_dataset_memory.py) and uses this directory only to pin the validation
+  # split, the one split re-read every epoch.
+  s3_cache_dir: /home/jovyan/wave_cache
+  # 8 parts per frame, measured. What matters more is the number of *frames* in flight,
+  # which is num_workers (each worker fetches serially), and that has a clear optimum:
+  # mimicking the DataLoader's pattern with P processes x 8 parts gave
+  #     P=4  352 MB/s     P=6  269 MB/s     P=8  380 MB/s     P=12  (see below)
+  # Raising parts per frame instead is worse: P=4 x 16 parts gave 294 MB/s. Going wide on
+  # frames is what oversubscribes: 12 workers x batch 4 = 48 samples = 96 frames in flight
+  # collapsed the observed rate to 175 MB/s, while a *separate* process on the same machine
+  # was still getting 424 MB/s at the same moment. So this is a concurrency knee, not a
+  # bandwidth ceiling, and num_workers x batch_size is the thing to keep modest.
+  s3_boto3_max_concurrency: 8
+  s3_boto3_part_size_mb: 64
+
+  # -- Development --
+  # null: use every matched sample. The scaling study picks its subset with
+  # --train-n, which takes a seeded EVENT-LEVEL stratified sample. Do not use
+  # max_samples for that: waveDSDataset head-slices a frame sorted by ds_index, so
+  # max_samples: 10 returns the 5 earliest pairs (all June-July 2010), not a sample.
+  max_samples: null
+
+
+# -----------------------------------------------------------------------------
+# Model
+# -----------------------------------------------------------------------------
+model:
+  pretrained_path: ../assets/surya.366m.v1.pt
+
+  # -- Backbone (Surya 366M defaults — match the pretrained checkpoint) --
+  img_size: 4096
+  patch_size: 16
+  in_channels: 13
+  embed_dim: 1280
+  depth: 10
+  spectral_blocks: 2
+  num_heads: 16
+  mlp_ratio: 4.0
+  drop_rate: 0.0
+  window_size: 2
+  dp_rank: 4
+  rpe: false
+  learned_flow: false
+  init_weights: false
+  checkpoint_layers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+  ensemble: null
+  time_embedding:
+    type: linear
+    n_queries: null
+    time_dim: 2         # Must equal len(data.time_delta_input_minutes)
+
+  # -- Fine-tuning head --
+  pooling: class_token
+  # head_linear (1280->1280) feeds head_unembed (1280->1) with no nonlinearity between
+  # them, so the pair is one linear map at eval: 1,639,680 params for zero extra capacity.
+  # Off by default; --no-penultimate / the A/B run flips it back on via the CLI.
+  penultimate_linear_layer: false
+  dropout: 0.2
+  freeze_backbone: false
+
+  # -- LoRA --
+  use_lora: true
+  lora_config:
+    r: 8                # --lora-r overrides; r=4 vs 8 is the capacity ablation
+    lora_alpha: 8
+    lora_dropout: 0.1
+    bias: none
+    # Names that exist in Surya: fc1/fc2 in all 10 blocks, attn.qkv (fused q/k/v) and
+    # attn.proj in the 8 attention blocks. 3,157,761 trainable with the penultimate layer
+    # on, 1,518,081 with it off.
+    target_modules: [fc1, fc2, attn.qkv, attn.proj]
+
+
+# -----------------------------------------------------------------------------
+# Training
+# -----------------------------------------------------------------------------
+training:
+  # 0.01 (the value config_script.yaml uses for the logistic baseline) DIVERGES Surya:
+  # losses of 10^2-10^4, exact 0.0 bf16 values, val accuracy and AUROC pinned at 0.5.
+  # 1e-4 is the starting point for the LR probe; --lr overrides per run.
+  learning_rate: 0.0001
+  # batch 2 is near-optimal, not a VRAM ceiling. One 65,536-token sample already saturates
+  # the L40S, so s/sample is flat in batch size. Measured on this GPU (44.4 GiB usable,
+  # LoRA + bf16 autocast + grad checkpointing on all 10 layers, fp32 inputs):
+  #
+  #     B=1   3.06 s/step   3.06 s/sample   peak alloc 16.3 GiB   reserved 20.2 GiB
+  #     B=2   6.25 s/step   3.12 s/sample   peak alloc 31.2 GiB   reserved 37.2 GiB
+  #     B=3   OOM
+  #
+  # So B=2 buys 2% worse s/sample for 1.8x the memory, and B=3 does not fit at all with
+  # fp32 inputs (it fits if `ts` is cast to bf16 first, at 3.59 s/sample — 15% worse, so
+  # there is no reason to). Effective batch comes from --accum instead, which costs nothing.
+  batch_size: 2
+  max_epochs: 14        # Per-run: --max-epochs
+  # ts is (B,13,2,4096,4096) fp32 = 1.74 GB/sample, so worst-case worker RSS is
+  # num_workers * prefetch_factor * batch_size * 1.74 GB. 8 workers at --prefetch-factor 1
+  # is 27.8 GB, which is both faster and lighter than 6 workers at the default factor of 2
+  # (41.8 GB). The default factor of 2 at 8 workers would be 56 GB before the main
+  # process, pinned copies and page cache -- on a 124 GB machine that is not survivable
+  # alongside a 1.8 GB checkpoint load. Also export OMP_NUM_THREADS=2 (8 workers, 16 CPUs).
+  num_workers: 8
+  seed: 42
+  deterministic: false  # ~20% wall time; not worth it on an 11 h schedule
+  rollout_steps: 0
+  drop_hmi_probability: 0.0
+  use_latitude_in_learned_flow: false
+  dtype: float32
+
+
+# -----------------------------------------------------------------------------
+# Output
+# -----------------------------------------------------------------------------
+output:
+  # The script appends the run name, so each run in the schedule keeps its own best.ckpt.
+  ckpt_dir: checkpoints
+  s3_bucket: null
+  s3_prefix: ""
+  s3_best_key: best.ckpt
+
+
+# -----------------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------------
+logging:
+  wandb_project: wave_classification
+  wandb_entity: lloverasdiego-grupo-de-estudios-en-heliofisica-de-mendoza

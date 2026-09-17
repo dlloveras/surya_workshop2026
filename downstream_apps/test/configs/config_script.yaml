@@ -24,7 +24,7 @@
 #   --deterministic warn   (reproducible run; see training.deterministic below)
 # =============================================================================
 
-job_id: solar_flare_forecasting
+job_id: wave_classification
 
 
 # -----------------------------------------------------------------------------
@@ -39,15 +39,25 @@ data:
   # -- Input channels and temporal sampling --
   channels: [aia94, aia131, aia171, aia193, aia211, aia304, aia335, aia1600,
              hmi_m, hmi_bx, hmi_by, hmi_bz, hmi_v]
-  time_delta_input_minutes: [0]   # Offsets (minutes) of input frames relative to reference timestep
-  time_delta_target_minutes: 60   # Step size (minutes) between forecast frames
+  # time_delta_input_minutes: [0]  # previous value. Combined with time_dim: 1 below it
+  #   built a 13-channel patch embedding, while the checkpoint's is Conv2d(26, 1280, 16, 16)
+  #   -- 13 channels x 2 timesteps. The shapes disagreed, so load_pretrained_weights()
+  #   skipped the tokenizer and it stayed RANDOM (156/159 tensors loaded instead of 157).
+  # The bucket's modal frame spacing is 12 min, so [-12, 0] is exactly one consecutive
+  # frame step -- which is also what the running-difference baseline needs.
+  time_delta_input_minutes: [-12, 0]   # Offsets (minutes) of input frames relative to reference timestep
+  time_delta_target_minutes: 10   # Step size (minutes) between forecast frames
 
-  # -- Downstream label alignment (flare catalog → Surya index) --
-  flare_index_path: ../data/hek_flare_catalog.csv
-  ds_time_column: start_time      # Column in the flare catalog used as the event timestamp
-  ds_time_tolerance: 4d           # Max allowed gap between catalog and Surya timestamps
-  ds_match_direction: forward     # "forward": use solar state *before* the flare (causal)
-
+  # -- Downstream label alignment (wave catalog → Surya index) --
+  wave_index_path: ../data/lcpf_aia_waves.csv
+  ds_time_column: mid_time      # Column in the wave catalog used as the event timestamp
+  # ds_time_tolerance: 4d         # previous value. 98.3% of train matches already land
+  #   within 15 min; the loosest ones (up to 1 day) are 9-to-1 "no wave", which is what
+  #   skewed the class balance to 612/619. Tightening it gives 606/604 (train), 25 val,
+  #   50 test -- see downstream_apps/test/experiments/results/ for the counts.
+  ds_time_tolerance: 15min        # Max allowed gap between catalog and Surya timestamps
+  ds_match_direction: forward     # "forward": use solar state *before* the event (causal)
+  ds_class_column: class #Class added wave or on wave by Diego.
   # -- Local data (only needed when the index contains relative local paths) --
   # sdo_data_root_path: /path/to/sdo   # Prepended to relative local paths; ignored for s3://
 
@@ -79,7 +89,18 @@ data:
   #
   # If none is set and the index contains s3:// paths, the run fails immediately with a
   # suggested path — not part-way through the first epoch. ~ and $ENV_VARS are expanded.
-  s3_cache_dir: null
+  # Measured on this machine, one 13-channel 0.59 GB frame:
+  #     S3 -> memory (BytesIO), 16-way          292 MB/s   (~400 MB/s aggregate, 4-8 in flight)
+  #     S3 -> local NVMe (/home/jovyan), 16-way 352 MB/s
+  #     S3 -> EFS (/home/jovyan/scratch_space)  8.9 MB/s at 8-way, 5.9 at 16-way
+  # The EFS mount is ~40x slower and gets WORSE with concurrency: its throughput is a
+  # property of the filesystem (bursting mode allots ~50 KB/s per GB stored, so ~210 MB/s
+  # for the whole 4.2 TB volume) shared with every other client mounting it. So the cache
+  # lives on the local NVMe here. It only has 77 GB free against a ~500 GB working set,
+  # which is why 4_finetune_wave_1D.py reads through RAM by default
+  # (datasets/wave_dataset_memory.py) and uses this directory only to pin the validation
+  # split, the one split re-read every epoch.
+  s3_cache_dir: /home/jovyan/wave_cache
 
   # -- S3 transfer tuning --
   # These control boto3's multipart download: how many threads download parts in
@@ -125,15 +146,21 @@ model:
   init_weights: false
   checkpoint_layers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
   ensemble: null
-  nglo: 1
   time_embedding:
     type: linear        # Options: linear | fourier | perceiver
     n_queries: null     # Required for perceiver; unused otherwise
-    time_dim: 1         # Number of input timesteps (must match time_delta_input_minutes length)
+    # time_dim: 1       # previous value -- see time_delta_input_minutes above: it is half of
+    #   what the checkpoint's tokenizer expects, so the tokenizer was silently left random.
+    time_dim: 2         # Number of input timesteps (must match time_delta_input_minutes length)
 
   # -- Fine-tuning head --
   pooling: class_token  # Options: class_token | global_average | global_max | attention | transformer
-  penultimate_linear_layer: true
+  # penultimate_linear_layer: true  # previous value. head_linear (1280->1280) feeds
+  #   head_unembed (1280->1) with no nonlinearity between them, so at eval the pair is
+  #   exactly one linear map: its 1,639,680 params add zero representational capacity
+  #   while being 52% of all trainable weights. Off by default -- less to overfit on a
+  #   few-hundred-sample training set. Head: 2,561 params; total trainable 1,518,081.
+  penultimate_linear_layer: false
   dropout: 0.2
   freeze_backbone: false
 
@@ -144,14 +171,22 @@ model:
     lora_alpha: 8
     lora_dropout: 0.1
     bias: none
-    target_modules: [q_proj, v_proj, k_proj, out_proj, fc1, fc2]
+    # previous value: [q_proj, v_proj, k_proj, out_proj, fc1, fc2]
+    #   Surya has none of those names -- q/k/v are fused into attn.qkv and the output
+    #   projection is attn.proj. PEFT only raises when *nothing* matches, so only fc1/fc2
+    #   were adapted: 2,666,241 trainable instead of 3,157,761. Attention never trained.
+    target_modules: [fc1, fc2, attn.qkv, attn.proj]
 
 
 # -----------------------------------------------------------------------------
 # Training
 # -----------------------------------------------------------------------------
 training:
-  learning_rate: 0.0001
+  # learning_rate: 0.0001  # previous value: with only 20 gradient steps (4 epochs x 5
+  #   batches on max_samples=10), this was too small to move the running-diff baseline's
+  #   loss off chance level (~0.693) within the notebook's hardcoded max_epochs=4.
+  learning_rate: 0.01      # diagnostic: at this LR the same baseline drove loss from
+  #   ~0.68 to ~0.023 in just 6 epochs (30 steps) on the 10-sample smoke-test set.
   batch_size: 2         # Per-device batch size under DDP
   max_epochs: 20        # Can be overridden with --max-epochs at the CLI
   num_workers: 8        # DataLoader worker processes per device (use 0 to debug in-process)
@@ -208,5 +243,5 @@ output:
 # Logging
 # -----------------------------------------------------------------------------
 logging:
-  wandb_project: template_flare_regression
-  wandb_entity: null      # WandB team/org name; null to log to your personal account
+  wandb_project: wave_classification
+  wandb_entity: lloverasdiego-grupo-de-estudios-en-heliofisica-de-mendoza      # avoid the surya-ws2 team's per-member run cap

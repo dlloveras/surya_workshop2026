@@ -1,14 +1,14 @@
 """
-Template metrics for flare forecasting.
+Template metrics for wave classification.
 
-FlareMetrics defines four metric sets:
-- "train_loss"    — differentiable loss that drives backpropagation (MSE).
+WaveMetrics defines four metric sets:
+- "train_loss"    — differentiable loss that drives backpropagation (BCE-with-logits).
 - "val_loss"      — the quantity logged as `val_loss` and used to select checkpoints.
-                    Defaults to the same MSE as "train_loss"; override it when your task
+                    Defaults to the same BCE as "train_loss"; override it when your task
                     needs a different validation objective.
-- "train_metrics" — non-differentiable metrics logged during training (RRSE).
-- "val_metrics"   — metrics logged at validation for reporting only (MSE + RRSE). These
-                    do NOT influence checkpoint selection — "val_loss" does.
+- "train_metrics" — non-differentiable metrics logged during training (accuracy).
+- "val_metrics"   — metrics logged at validation for reporting only (accuracy + AUROC).
+                    These do NOT influence checkpoint selection — "val_loss" does.
 
 The __call__ method selects the appropriate metric set based on the mode passed at
 construction time. The dictionary keys returned by each method become the metric names
@@ -22,10 +22,14 @@ import torchmetrics as tm  # Lots of possible metrics in here https://lightning.
 # linear baseline, while targets are always (B, 1). Every metric below flattens both with
 # reshape(-1) rather than squeeze(-1): squeeze is shape-dependent and collapses a
 # batch of one to a 0-d scalar, which then fails to broadcast against a (1,) target.
-class FlareMetrics:
+#
+# All preds below are raw logits (no sigmoid applied). torchmetrics' Binary* metrics
+# auto-apply sigmoid whenever inputs fall outside [0, 1], matching what
+# binary_cross_entropy_with_logits sees, so no explicit .sigmoid() call is needed.
+class WaveMetrics:
     def __init__(self, mode: str):
         """
-        Initialize FlareMetrics class.
+        Initialize WaveMetrics class.
 
         Args:
             mode (str): Mode to use for metric evaluation. One of "train_loss",
@@ -34,12 +38,15 @@ class FlareMetrics:
         self.mode = mode
 
         # Cache torchmetrics instances once (instead of recreating each call)
-        self._rrse = tm.RelativeSquaredError(squared=False)
+        self._accuracy = tm.classification.BinaryAccuracy()
+        self._auroc = tm.classification.BinaryAUROC()
 
     def _ensure_device(self, preds: torch.Tensor) -> None:
         """Move torchmetrics modules to the same device as ``preds``, if needed."""
-        if self._rrse.device != preds.device:
-            self._rrse = self._rrse.to(preds.device)
+        if self._accuracy.device != preds.device:
+            self._accuracy = self._accuracy.to(preds.device)
+        if self._auroc.device != preds.device:
+            self._auroc = self._auroc.to(preds.device)
 
     def train_loss(
         self, preds: torch.Tensor, target: torch.Tensor
@@ -54,7 +61,7 @@ class FlareMetrics:
         Returns:
             tuple[dict[str, torch.Tensor], list[float]]:
                 - dict[str, torch.Tensor]: Dictionary containing the calculated loss metrics.
-                                        Keys are metric names (e.g., "mse"), and values are the
+                                        Keys are metric names (e.g., "bce"), and values are the
                                         corresponding torch.Tensor values.
                 - list[float]: List of weights for each calculated metric.
         """
@@ -62,7 +69,9 @@ class FlareMetrics:
         output_metrics = {}
         output_weights = []
 
-        output_metrics["mse"] = torch.nn.functional.mse_loss(preds.reshape(-1), target.reshape(-1))
+        output_metrics["bce"] = torch.nn.functional.binary_cross_entropy_with_logits(
+            preds.reshape(-1), target.reshape(-1)
+        )
         output_weights.append(1)
 
         return output_metrics, output_weights
@@ -116,9 +125,8 @@ class FlareMetrics:
         output_weights = []
 
         self._ensure_device(preds)
-        output_metrics["rrse"] = self._rrse(preds.reshape(-1), target.reshape(-1))
-        output_weights.append(1)        
-
+        output_metrics["accuracy"] = self._accuracy(preds.reshape(-1), target.reshape(-1).long())
+        output_weights.append(1)
 
         return output_metrics, output_weights
 
@@ -135,20 +143,20 @@ class FlareMetrics:
         Returns:
             tuple[dict[str, torch.Tensor], list[float]]:
                 - dict[str, torch.Tensor]: Dictionary containing the calculated metrics.
-                                        Keys are metric names (e.g., "mse"), and values are the
-                                        corresponding torch.Tensor values.
+                                        Keys are metric names (e.g., "accuracy"), and values are
+                                        the corresponding torch.Tensor values.
                 - list[float]: List of weights for each calculated metric.
         """
 
         output_metrics = {}
         output_weights = []
 
-        output_metrics["mse"] = torch.nn.functional.mse_loss(preds.reshape(-1), target.reshape(-1))
+        self._ensure_device(preds)
+        output_metrics["accuracy"] = self._accuracy(preds.reshape(-1), target.reshape(-1).long())
         output_weights.append(1)
 
-        self._ensure_device(preds)
-        output_metrics["rrse"] = self._rrse(preds.reshape(-1), target.reshape(-1))
-        output_weights.append(1)            
+        output_metrics["auroc"] = self._auroc(preds.reshape(-1), target.reshape(-1).long())
+        output_weights.append(1)
 
         return output_metrics, output_weights
 
@@ -165,7 +173,7 @@ class FlareMetrics:
             tuple[dict[str, torch.Tensor], list[float]]:
                 - Metric dictionary. Keys become logger metric names; values are
                   scalar tensors aggregated over the batch.
-                - List of per-metric weights (used by FlareLightningModule to
+                - List of per-metric weights (used by WaveLightningModule to
                   combine multiple loss terms into a single scalar).
         """
 

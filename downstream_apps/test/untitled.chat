@@ -1,0 +1,57 @@
+{
+  "messages": [],
+  "users": {
+    "jupyter-ai-personas::jupyter_ai_acp_client::ClaudeAcpPersona": {
+      "name": "Claude",
+      "initials": null,
+      "display_name": "Claude",
+      "bot": true,
+      "username": "jupyter-ai-personas::jupyter_ai_acp_client::ClaudeAcpPersona",
+      "avatar_url": "/user/dlloveras/api/ai/avatars/jupyter-ai-personas%3A%3Ajupyter_ai_acp_client%3A%3AClaudeAcpPersona",
+      "color": null
+    },
+    "jupyter-ai-personas::jupyter_ai_acp_client::CodexAcpPersona": {
+      "color": null,
+      "bot": true,
+      "name": "Codex",
+      "display_name": "Codex",
+      "initials": null,
+      "username": "jupyter-ai-personas::jupyter_ai_acp_client::CodexAcpPersona",
+      "avatar_url": "/user/dlloveras/api/ai/avatars/jupyter-ai-personas%3A%3Ajupyter_ai_acp_client%3A%3ACodexAcpPersona"
+    },
+    "jupyter-ai-personas::jupyter_ai_acp_client::CopilotAcpPersona": {
+      "color": null,
+      "avatar_url": "/user/dlloveras/api/ai/avatars/jupyter-ai-personas%3A%3Ajupyter_ai_acp_client%3A%3ACopilotAcpPersona",
+      "bot": true,
+      "initials": null,
+      "display_name": "Copilot",
+      "username": "jupyter-ai-personas::jupyter_ai_acp_client::CopilotAcpPersona",
+      "name": "Copilot"
+    },
+    "jupyter-ai-personas::jupyter_ai_jupyternaut::JupyternautPersona": {
+      "avatar_url": "/user/dlloveras/api/ai/avatars/jupyter-ai-personas%3A%3Ajupyter_ai_jupyternaut%3A%3AJupyternautPersona",
+      "color": null,
+      "bot": true,
+      "display_name": "Jupyternaut",
+      "initials": null,
+      "username": "jupyter-ai-personas::jupyter_ai_jupyternaut::JupyternautPersona",
+      "name": "Jupyternaut"
+    },
+    "jupyter-ai-personas::jupyter_ai_acp_client::MistralVibeAcpPersona": {
+      "name": "Mistral Vibe",
+      "username": "jupyter-ai-personas::jupyter_ai_acp_client::MistralVibeAcpPersona",
+      "initials": null,
+      "bot": true,
+      "color": null,
+      "avatar_url": "/user/dlloveras/api/ai/avatars/jupyter-ai-personas%3A%3Ajupyter_ai_acp_client%3A%3AMistralVibeAcpPersona",
+      "display_name": "Mistral Vibe"
+    }
+  },
+  "attachments": {},
+  "metadata": {
+    "acp_session_ids": {
+      "jupyter-ai-personas::jupyter_ai_acp_client::ClaudeAcpPersona": "b68c24ab-bc31-4809-9e8f-09f741f84057"
+    },
+    "id": "0d4b9697-0740-4baa-b778-6a2f594209c5"
+  }
+}
