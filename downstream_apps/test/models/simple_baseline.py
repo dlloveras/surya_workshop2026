@@ -132,6 +132,52 @@ def mean_abs_pooled_running_difference(
     pooled = F.avg_pool2d(diff.unsqueeze(1), kernel_size=pool_kernel)     # (B, 1, S, S)
     return pooled.abs().mean(dim=(-2, -1))                                # (B, 1)
 
+
+def pooled_running_difference_stats(
+    ts_signum_log: torch.Tensor,
+    channel_index: int,
+    pool_kernel: int,
+) -> torch.Tensor:
+    """Collapse a running-difference image into a 5-number summary per sample.
+
+    Same first two steps as ``mean_abs_pooled_running_difference()`` — mean-pool the
+    running difference by ``pool_kernel``, THEN take the absolute value (see that
+    function's docstring for why the order matters: it lets incoherent pixel noise
+    partially cancel during pooling while a coherent brightening survives it). Instead
+    of collapsing the resulting |pooled diff| map to a single spatial mean, this keeps
+    five statistics of its distribution across the (S, S) grid of blocks:
+
+        [p98, p95, p90, mean, std]
+
+    The percentiles are sensitive to a small number of strongly-brightened blocks (a
+    localized wave front against a quiet background); mean and std describe the overall
+    level and spread. Together they give the linear layer more to work with than a
+    single scalar — at the cost of turning ``nn.Linear(1, 1)`` into ``nn.Linear(5, 1)``
+    (6 trainable parameters instead of 2).
+
+    Args:
+        ts_signum_log: ``(B, C, T, H, W)`` in signum-log space (channel z-score undone,
+            log compression retained) — see ``destandardize_channels()``.
+        channel_index: Index of the channel to difference within the C dimension.
+        pool_kernel: Mean-pool kernel size (and stride), applied before the absolute
+            value.
+
+    Returns:
+        ``(B, 5)`` tensor: ``[p98, p95, p90, mean, std]`` of ``|pool_K(now - prev)|``,
+        each computed over the spatial (S, S) grid of pooled blocks for that sample.
+    """
+    x = ts_signum_log[:, channel_index]                                   # (B, T, H, W)
+    diff = x[:, -1] - x[:, 0]                                             # (B, H, W)
+    pooled = F.avg_pool2d(diff.unsqueeze(1), kernel_size=pool_kernel)     # (B, 1, S, S)
+    pooled_abs = pooled.abs().flatten(start_dim=1)                       # (B, S*S)
+
+    q = torch.tensor([0.98, 0.95, 0.90], device=pooled_abs.device, dtype=pooled_abs.dtype)
+    p98, p95, p90 = torch.quantile(pooled_abs, q, dim=1)                 # each (B,)
+    mean = pooled_abs.mean(dim=1)                                        # (B,)
+    std = pooled_abs.std(dim=1)                                          # (B,)
+
+    return torch.stack([p98, p95, p90, mean, std], dim=1)                # (B, 5)
+
 class RunningDifferenceLogisticModel(nn.Module):
     """Trainable baseline: logistic regression on ONE scalar per sample.
 
@@ -182,7 +228,7 @@ class RunningDifferenceLogisticModel(nn.Module):
         self.pool_kernel = pool_kernel
         # 1 -> 1: two parameters, a slope and a threshold. img_size is irrelevant now,
         # because the readout width no longer depends on the image resolution.
-        self.linear = nn.Linear(1, 1)
+        self.linear = nn.Linear(5, 1)
 
     def forward(self, batch: dict) -> torch.Tensor:
         """
@@ -192,7 +238,10 @@ class RunningDifferenceLogisticModel(nn.Module):
         Returns:
             ``(B, 1)`` logits.
         """
-        feature = mean_abs_pooled_running_difference(
+        #feature = mean_abs_pooled_running_difference(
+        #    batch["ts"], self.channel_index, self.pool_kernel
+        #)
+        features = pooled_running_difference_stats(
             batch["ts"], self.channel_index, self.pool_kernel
         )
-        return self.linear(feature)
+        return self.linear(features)

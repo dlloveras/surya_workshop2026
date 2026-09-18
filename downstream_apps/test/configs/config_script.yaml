@@ -96,10 +96,12 @@ data:
   # The EFS mount is ~40x slower and gets WORSE with concurrency: its throughput is a
   # property of the filesystem (bursting mode allots ~50 KB/s per GB stored, so ~210 MB/s
   # for the whole 4.2 TB volume) shared with every other client mounting it. So the cache
-  # lives on the local NVMe here. It only has 77 GB free against a ~500 GB working set,
-  # which is why 4_finetune_wave_1D.py reads through RAM by default
-  # (datasets/wave_dataset_memory.py) and uses this directory only to pin the validation
-  # split, the one split re-read every epoch.
+  # lives on the local NVMe here. It is far too small for the ~500 GB working set (measured
+  # at 29 GB free with 38 GB already in this directory, and nothing in the s3_mode:
+  # download path ever evicts), which is why 4_finetune_wave_1D.py reads through RAM by
+  # default (datasets/wave_dataset_memory.py) and uses this directory only to pin the
+  # validation split, the one split re-read every epoch, under --cache-budget-gb.
+  # Check the free space rather than trusting this comment: `df -h /home/jovyan`.
   s3_cache_dir: /home/jovyan/wave_cache
 
   # -- S3 transfer tuning --
@@ -119,7 +121,7 @@ data:
   s3_boto3_part_size_mb: 64       # part size in MB (benchmark default: 64)
 
   # -- Development --
-  max_samples: 10                 # Cap dataset size for quick experiments (null = all samples)
+  max_samples: 50                 # Cap dataset size for quick experiments (null = all samples)
 
 
 # -----------------------------------------------------------------------------
@@ -182,11 +184,17 @@ model:
 # Training
 # -----------------------------------------------------------------------------
 training:
-  # learning_rate: 0.0001  # previous value: with only 20 gradient steps (4 epochs x 5
-  #   batches on max_samples=10), this was too small to move the running-diff baseline's
-  #   loss off chance level (~0.693) within the notebook's hardcoded max_epochs=4.
-  learning_rate: 0.01      # diagnostic: at this LR the same baseline drove loss from
-  #   ~0.68 to ~0.023 in just 6 epochs (30 steps) on the 10-sample smoke-test set.
+  # learning_rate: 0.01   # previous value, and a DIVERGENT one for Surya. It was chosen
+  #   as a diagnostic for the 16 K-parameter logistic baseline, which it does drive from
+  #   ~0.68 to ~0.023 in 6 epochs (30 steps) on the 10-sample set. Applied to the 366 M
+  #   backbone it blows up instead: runs/wave_classification/version_8/metrics.csv records
+  #   train_loss going 8.69 -> 93.0 -> 76.0 -> 64.5 -> 33.25 with val accuracy AND val
+  #   AUROC both pinned at 0.5 -- i.e. no learning at all, just a diverging loss.
+  #   config_wave_full.yaml's training: block says the same thing independently.
+  #   If you are running the logistic baseline rather than Surya, pass lr=0.01 at the
+  #   WaveLightningModule call site: 0.01 is a property of that 16 K-param model, not of
+  #   this config.
+  learning_rate: 0.0001    # the starting point for a Surya fine-tune
   batch_size: 2         # Per-device batch size under DDP
   max_epochs: 20        # Can be overridden with --max-epochs at the CLI
   num_workers: 8        # DataLoader worker processes per device (use 0 to debug in-process)

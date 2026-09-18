@@ -21,13 +21,21 @@ The configured ``s3_cache_dir`` is on an EFS mount whose throughput is a propert
 which for the 4.2 TB filesystem is ~210 MB/s shared by every client mounting it, and
 another tenant was consuming almost all of it. Raising concurrency made it *worse*, which
 is the signature of a contended filesystem rather than a slow client. The local NVMe is
-fast but only has 77 GB free, against a ~500 GB working set.
+fast but far too small for the ~500 GB working set (29 GB free when this was last measured,
+with 38 GB already in the cache directory).
 
 So the fix is to stop writing the frame down at all: fetch the whole object into RAM and
 hand the buffer to ``h5netcdf``, which gives HDF5 the random access it needs without
 touching a disk. One in-flight frame costs 0.59 GB of RAM, so eight workers holding two
-frames each is ~9.4 GB — affordable on 124 GB, and the network path is 30-40x faster than
-the one it replaces.
+frames each is ~9.4 GB, and the network path is 30-40x faster than the one it replaces.
+
+Whether that ~9.4 GB is affordable is **not** a question this docstring can answer, and an
+earlier version of it wrongly asserted "affordable on 124 GB". That figure came from `free`,
+which inside a container reports the host node rather than the cgroup that will actually
+kill you: the same machine reported 248 GB to `free` and 60 GiB to
+``/sys/fs/cgroup/memory.max``. Use ``workshop_infrastructure.resource_guard`` — it reads the
+real limit, prints it, and aborts on it — and note that the per-frame buffer here is on top
+of whatever the DataLoader queues, which is the larger term.
 
 Two consequences worth being explicit about:
 

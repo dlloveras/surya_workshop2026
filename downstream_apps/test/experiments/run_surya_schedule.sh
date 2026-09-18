@@ -24,7 +24,12 @@
 # At 12 the rate more than halves while a separate process on the same machine still reads at
 # 424 MB/s, so it is a concurrency knee rather than a bandwidth ceiling. At 8 workers the data
 # path costs 2.97 s/sample against 3.11 s/sample of GPU, so the GPU is (just) the limiter.
-# Do not raise this to "use the other 8 CPUs".
+#
+# Throughput is not what picks this number, though -- MEMORY is. Those measurements assumed a
+# 124 GB / 16 CPU machine, which is what `free` and nproc report; the container's cgroup was
+# actually 60 GiB and 7 CPUs, and 8 workers queue 52 GiB across the two DataLoader pools. A
+# run sized that way was OOM-killed with no traceback. See config_wave_full.yaml's num_workers
+# comment and workshop_infrastructure/resource_guard.py, which reads the real limit.
 #
 # Usage:
 #   bash downstream_apps/test/experiments/run_surya_schedule.sh            # everything
@@ -43,9 +48,11 @@ RESULTS="downstream_apps/test/experiments/results"
 LOGS="$RESULTS/logs"
 mkdir -p "$LOGS"
 
-# 8 workers on 16 CPUs: leave each worker two threads rather than letting every one of them
-# spin up 16 and thrash. This matters here because signum-log normalization is the dominant
-# CPU cost per sample.
+# Leave each worker two threads rather than letting every one of them size its OpenMP pool
+# from the CPU count it SEES. That count is the host's (nproc said 32) while the cgroup quota
+# is far lower (cpu.max said 7), so the default oversubscribes several times over and the
+# workers contend instead of fetching. This matters here because signum-log normalization is
+# the dominant CPU cost per sample.
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-2}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 

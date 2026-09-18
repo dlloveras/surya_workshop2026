@@ -64,6 +64,7 @@ from downstream_apps.test.experiments import wave_common as wc
 from downstream_apps.test.lightning_modules.pl_simple_baseline import WaveLightningModule
 from downstream_apps.test.metrics.template_metrics import WaveMetrics
 from workshop_infrastructure.assets import ensure_assets
+from workshop_infrastructure.resource_guard import ResourceGuard, describe_memory_budget
 from workshop_infrastructure.utils import (
     UploadBestCheckpointToS3,
     apply_peft_lora,
@@ -157,8 +158,11 @@ def parse_args() -> argparse.Namespace:
                         "s3_cache_dir) instead of reading through RAM. The configured "
                         "cache is on an EFS mount measured at 9 MB/s against 400 MB/s "
                         "for the memory path, so this is for debugging only.")
-    p.add_argument("--rss-ceiling-gb", type=float, default=70.0,
-                   help="Abort if the process tree's proportional set size crosses this.")
+    p.add_argument("--rss-ceiling-gb", type=float, default=None,
+                   help="Abort if the process tree's proportional set size (GiB) crosses "
+                        "this. Default: 75%% of the machine's real limit, read from the "
+                        "cgroup at startup and printed. Pass a number only to override a "
+                        "correctly detected limit.")
     return p.parse_args()
 
 
@@ -188,69 +192,6 @@ def normalize_max_time(value: str | None) -> str | None:
         )
     parts = ["0"] * (4 - len(parts)) + parts
     return ":".join(f"{int(p):02d}" for p in parts)
-
-
-class ResourceGuard(L.Callback):
-    """Log GPU and host memory periodically, and abort before the machine dies.
-
-    The hazard here is host RAM, not VRAM. One sample of ``ts`` is
-    ``(13, 2, 4096, 4096)`` fp32 = 1.74 GB, and every DataLoader worker holds
-    ``prefetch_factor * batch_size`` of them, so a mis-set worker count is the difference
-    between 27.8 GB and 56 GB on a 124 GB machine that is also holding a 1.8 GB checkpoint
-    and pinned copies of every batch. An OOM kill takes the whole schedule down with it;
-    raising here loses one run.
-
-    Proportional set size (PSS) is used rather than RSS: workers share the parent's
-    copy-on-write pages, so summing RSS across the tree double-counts them and would
-    trip the ceiling on a healthy run.
-    """
-
-    def __init__(self, every_n_steps: int = 25, ceiling_gb: float = 70.0):
-        self.every_n_steps = every_n_steps
-        self.ceiling_gb = ceiling_gb
-        self.peak_host_gb = 0.0
-        self._proc = None
-
-    def _tree_memory_gb(self) -> tuple[float, str]:
-        import psutil
-        if self._proc is None:
-            self._proc = psutil.Process()
-        procs = [self._proc] + self._proc.children(recursive=True)
-        total, kind = 0.0, "pss"
-        for p in procs:
-            try:
-                info = p.memory_full_info()
-                total += getattr(info, "pss", None) or info.rss
-                if not hasattr(info, "pss"):
-                    kind = "rss"
-            except Exception:
-                continue  # a worker exiting between listing and reading is not an error
-        return total / 2**30, kind
-
-    def _report(self, trainer, tag: str) -> None:
-        host_gb, kind = self._tree_memory_gb()
-        self.peak_host_gb = max(self.peak_host_gb, host_gb)
-        msg = f"[RES] {tag} host {kind}={host_gb:.1f} GB (peak {self.peak_host_gb:.1f})"
-        if torch.cuda.is_available():
-            alloc = torch.cuda.max_memory_allocated() / 2**30
-            reserved = torch.cuda.max_memory_reserved() / 2**30
-            msg += f" | cuda peak alloc={alloc:.1f} GB reserved={reserved:.1f} GB"
-        print(msg, flush=True)
-        if host_gb > self.ceiling_gb:
-            raise RuntimeError(
-                f"Host memory {host_gb:.1f} GB crossed the {self.ceiling_gb:.1f} GB ceiling. "
-                f"Lower --num-workers or --prefetch-factor (worst case is "
-                f"num_workers * prefetch_factor * batch_size * 1.74 GB), or raise "
-                f"--rss-ceiling-gb if this machine really has the headroom."
-            )
-
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        if batch_idx % self.every_n_steps == 0:
-            self._report(trainer, f"epoch {trainer.current_epoch} batch {batch_idx}")
-
-    def on_validation_epoch_end(self, trainer, pl_module):
-        if not trainer.sanity_checking:
-            self._report(trainer, f"epoch {trainer.current_epoch} val end")
 
 
 # ---------------------------------------------------------------------------
@@ -561,6 +502,10 @@ def main() -> None:
           f"workers={cfg.num_workers} prefetch={args.prefetch_factor} "
           f"lora_r={cfg.model.lora_config.r} "
           f"penultimate={cfg.model.penultimate_linear_layer} max_time={args.max_time}")
+    # Worst-case loader memory against this machine's real limit, before anything is
+    # allocated. Cheaper to read here than to infer from an OOM kill.
+    print(describe_memory_budget(
+        cfg.num_workers, args.prefetch_factor, cfg.batch_size), flush=True)
 
     ensure_assets(cfg, which=["scalers"] if args.train_baseline else ["scalers", "weights"])
     scalers = build_scalers(info=cfg.data.scalers_path)

@@ -140,6 +140,19 @@ CLI overrides are deliberately limited to what varies between runs of one config
 
 DDP via PyTorch Lightning. Use `CUDA_VISIBLE_DEVICES` to select GPUs. Logging is rank-aware to avoid duplicate WandB/CSV entries.
 
+### Resource limits are read, not remembered
+
+**Host RAM, not VRAM, is what a Surya fine-tune runs out of.** One sample of `ts` is `(13, 2, 4096, 4096)` fp32 = **1.625 GiB**, so worst-case DataLoader memory is `num_workers * prefetch_factor * batch_size * 1.625 GiB` **per loader** — doubled, because Lightning's sanity check builds the validation worker pool before the first training batch and the training iterator stays alive through validation. When this runs out there is no exception to catch: the OOM killer takes the process, and in a container often the whole process tree. The symptom is a notebook cell with streamed output and no `execution_count`, or a batch job that simply stopped.
+
+**Never budget against a number written in a comment.** Five places in this repo once asserted "a 124 GB machine with 16 CPUs", taken from `free` and `nproc`. Both report the **host node**; the container is capped by a cgroup, and on the machine those comments were written for the real limits were 60 GiB and 7 CPUs with no swap. A run sized for 124 GB was OOM-killed. `workshop_infrastructure/resource_guard.py` exists so the number is derived instead:
+
+- `detect_memory_ceiling_gib()` — cgroup v2, then v1, then the host. Use this, never `psutil.virtual_memory().total`.
+- `memory_unreclaimable_gib()` — returns `(unreclaimable, page_cache)`. The distinction decides whether a reading is alarming: `memory.current` counts page cache, which the kernel evicts rather than OOM-killing, but it also nests `shmem` inside `file` — and `shmem` is where DataLoader workers put every collated batch, so it *cannot* be reclaimed without swap. Measured mid-training: 40.6 GiB charged, of which 18.0 GiB shmem and only 12.2 GiB genuine cache.
+- `describe_memory_budget()` — prints the arithmetic for a setting against the detected ceiling.
+- `ResourceGuard` — a Lightning callback that reports at `on_train_start` and periodically, then raises naming the knob to turn. Its ceiling defaults to 75% of the detected limit, so it **cannot** be set above the real cap — which is what a hard-coded 70 GB was on a 60 GiB container, making the guard decorative.
+
+`build_helio_dataloaders()` exposes `prefetch_factor` (**defaulting to 1, not PyTorch's 2**), `persistent_workers`, `pin_memory` and `drop_last_val`. Pass `persistent_workers=False` in a notebook: a persistent pool outlives the iterator, so after an interrupt its reset handshake talks to dead PIDs and Lightning reports the misleading `RuntimeError: Please call iter(combined_loader) first.`
+
 ## Key File Locations
 
 | Purpose | Path |
@@ -150,6 +163,7 @@ DDP via PyTorch Lightning. Use `CUDA_VISIBLE_DEVICES` to select GPUs. Logging is
 | Config dataclasses + `load_config()` | `workshop_infrastructure/configs.py` |
 | Asset download (scalers, weights) | `workshop_infrastructure/assets.py` |
 | LoRA application + `head_` discovery | `workshop_infrastructure/utils.py` |
+| Memory-limit detection + `ResourceGuard` | `workshop_infrastructure/resource_guard.py` |
 | LoRA setup tests | `tests/test_lora_setup.py` |
 | Downstream adapter model | `workshop_infrastructure/models/finetune_models.py` |
 | Fine-tuning entry point | `downstream_apps/template/3_finetune_template_1D.py` |

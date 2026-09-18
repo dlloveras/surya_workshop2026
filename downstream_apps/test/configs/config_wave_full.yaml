@@ -67,10 +67,12 @@ data:
   # The EFS mount is ~40x slower and gets WORSE with concurrency: its throughput is a
   # property of the filesystem (bursting mode allots ~50 KB/s per GB stored, so ~210 MB/s
   # for the whole 4.2 TB volume) shared with every other client mounting it. So the cache
-  # lives on the local NVMe here. It only has 77 GB free against a ~500 GB working set,
-  # which is why 4_finetune_wave_1D.py reads through RAM by default
-  # (datasets/wave_dataset_memory.py) and uses this directory only to pin the validation
-  # split, the one split re-read every epoch.
+  # lives on the local NVMe here. It is far too small for the ~500 GB working set (measured
+  # at 29 GB free with 38 GB already in this directory, and nothing in the s3_mode:
+  # download path ever evicts), which is why 4_finetune_wave_1D.py reads through RAM by
+  # default (datasets/wave_dataset_memory.py) and uses this directory only to pin the
+  # validation split, the one split re-read every epoch, under --cache-budget-gb.
+  # Check the free space rather than trusting this comment: `df -h /home/jovyan`.
   s3_cache_dir: /home/jovyan/wave_cache
   # 8 parts per frame, measured. What matters more is the number of *frames* in flight,
   # which is num_workers (each worker fetches serially), and that has a clear optimum:
@@ -163,13 +165,27 @@ training:
   # there is no reason to). Effective batch comes from --accum instead, which costs nothing.
   batch_size: 2
   max_epochs: 14        # Per-run: --max-epochs
-  # ts is (B,13,2,4096,4096) fp32 = 1.74 GB/sample, so worst-case worker RSS is
-  # num_workers * prefetch_factor * batch_size * 1.74 GB. 8 workers at --prefetch-factor 1
-  # is 27.8 GB, which is both faster and lighter than 6 workers at the default factor of 2
-  # (41.8 GB). The default factor of 2 at 8 workers would be 56 GB before the main
-  # process, pinned copies and page cache -- on a 124 GB machine that is not survivable
-  # alongside a 1.8 GB checkpoint load. Also export OMP_NUM_THREADS=2 (8 workers, 16 CPUs).
-  num_workers: 8
+  # ts is (B,13,2,4096,4096) fp32 = 1.625 GiB/sample, so worst-case DataLoader memory is
+  # num_workers * prefetch_factor * batch_size * 1.625 GiB PER LOADER -- and the train and
+  # val pools coexist, because Lightning's sanity check builds the validation pool before
+  # the first training batch and the training iterator stays alive through validation.
+  #
+  # DO NOT budget this against a number written in a comment. Earlier versions of this file
+  # sized it for "a 124 GB machine with 16 CPUs", which is what `free` and nproc reported.
+  # Both were the HOST: the container is capped by a cgroup, and on the machine this was
+  # last run on that cap was 60 GiB and 7 CPUs. A run sized for 124 GB was killed by the
+  # OOM killer with no traceback. workshop_infrastructure/resource_guard.py reads the real
+  # limit at startup and prints it; ResourceGuard aborts on it. Read the printout.
+  #
+  # num_workers: 8   # previous value. 8 x 1 x 2 is 52 GiB of queued batches across the two
+  #   pools before transients, the main process and the checkpoint write -- over the 60 GiB
+  #   cap, so this config could not complete an epoch on that container either. Measured at
+  #   2 workers: ~28 GiB of unreclaimable memory (10 GiB anonymous + 18 GiB of /dev/shm
+  #   worker queues) against 12 GiB of reclaimable page cache.
+  num_workers: 3
+  # Also export OMP_NUM_THREADS=2: each worker otherwise sizes its OpenMP pool from the
+  # CPU count it SEES (32) rather than the cgroup quota (7), and they contend instead of
+  # fetching. run_surya_schedule.sh already does this.
   seed: 42
   deterministic: false  # ~20% wall time; not worth it on an 11 h schedule
   rollout_steps: 0
